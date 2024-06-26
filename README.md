@@ -67,10 +67,10 @@ The script includes various visualizations to help understand the data distribut
 * Scatter plots of the number of sessions and value of purchases.
 * Boxplots comparing different experiment cases.
 
-Contribution
+### Contribution
 
 Feel free to fork this repository and submit pull requests. For major changes, please open an issue first to discuss what you would like to change.
 
-License
+### License
 
 This project is licensed under the MIT License.
