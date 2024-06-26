@@ -1,0 +1,1578 @@
+---
+title: "Data "
+output: html_document
+---
+
+#0-Configuración
+
+##0.1-Configuration BigQuery
+```{r preprocessing, warning=F, message=F, echo=F}
+## Preprocessing
+library(bigrquery)
+library(dplyr)
+library(ggplot2)
+con <- dbConnect(
+#  bigrquery::bigquery(),
+#  project = <project_id>,
+#  dataset = <dataset_id>,
+#  billing = <billing_id>
+)
+""
+# Store the project id
+#projectid = <project_id>
+```
+
+#1-Load and Tidy Datasets
+##1.1-Load all data relevant to session, user and country that I will use as a base
+```{r preprocessing, warning=F, message=F, echo=F}
+## Preprocessing
+# Set your query
+sql <- " 
+    SELECT
+        param.value.int_value AS ga_session_id,
+        user_pseudo_id,
+        user_id,
+        event_date,
+        geo.country
+    FROM 
+        `<project_id>.<dataset_id>.events_*`,
+        UNNEST(event_params) AS param
+    WHERE 
+        param.key = 'ga_session_id'
+    AND
+        param.value.int_value IS NOT NULL
+"
+
+# Run the query and store the data in a tibble
+sessions <- bq_project_query(projectid, sql)
+
+# Download the data into a tibble
+sessions_data <- bq_table_download(sessions)
+
+sessions_data
+```
+##1.2-Load all experiment case data per session
+###1.2.1-Retrieve experiment data from BigQuery
+```{r preprocessing, warning=F, message=F, echo=F}
+## Preprocessing
+# Set your query
+sql <- "
+    SELECT
+        param1.value.int_value AS ga_session_id,
+        param2.value.int_value AS experiment_case
+    FROM 
+        `<project_id>.<dataset_id>.events_*`,
+        UNNEST(event_params) AS param1,
+        UNNEST(user_properties) AS param2
+    WHERE 
+        param1.key = 'ga_session_id' AND
+        param2.key= 'experiment_case'
+"
+
+# Run the query and store the data in a tibble
+experiments <- bq_project_query(projectid, sql)
+
+# Download the data into a tibble
+experiments_data <- bq_table_download(experiments)
+
+experiments_data
+```
+
+###1.2.2-Wrangle data to get only the sessions with its associated experiment_case, then I made sure that sessions with more than 1 experiment case would be filter
+```{r preprocessing, warning=F, message=F, echo=F}
+## Here I am checking that I am only counting the sessions that contain only 1 experiment case
+experiment_data_tidy <- experiments_data %>% 
+  group_by(ga_session_id) %>% 
+  summarise(experiment_case =unique(experiment_case)) %>% 
+  group_by(ga_session_id) %>% 
+  summarise(instances_of_unique_experiment_case = n()) %>% 
+  #Here I am filtering out all sessions with more than one type of experiment case
+  filter(instances_of_unique_experiment_case == 1)
+
+## Here I am joining the experiment case number knowing that all sessions were expose to a single case
+experiment_data_tidy <-experiment_data_tidy %>% 
+  left_join(experiments_data, by = 'ga_session_id') %>% 
+  group_by(ga_session_id) %>% 
+  summarise(experiment_case = unique(experiment_case))
+
+experiment_data_tidy
+```
+
+
+
+
+
+
+
+
+
+
+
+##1.3-Load all time expend in producer and engagement time case data per session
+###1.3.1-Retrieve data from BigQuery
+```{r preprocessing, warning=F, message=F, echo=F}
+## Preprocessing
+# Set your query
+sql <- "
+SELECT 
+  param1.value.int_value AS ga_session_id,
+  param2.value.double_value AS time_spent_in_producer,
+  param3.value.int_value AS engagement_time_msec
+FROM `<project_id>.<dataset_id>.events_*`,
+  UNNEST(event_params) AS param1,
+  UNNEST(event_params) AS param2,
+  UNNEST (event_params) AS param3
+WHERE event_name = 'page_unload'
+    AND param1.key = 'ga_session_id'
+    AND param2.key = 'timeSpentInProducer'
+    AND param3.key = 'engagement_time_msec'
+"
+
+# Run the query and store the data in a tibble
+time_producer_and_engagement <- bq_project_query(projectid, sql)
+
+# Download the data into a tibble
+time_producer_and_engagement_data <- bq_table_download(time_producer_and_engagement)
+
+time_producer_and_engagement_data
+```
+
+###1.3.2-Wrangle data to sum times
+```{r preprocessing, warning=F, message=F, echo=F}
+time_producer_and_engagement_data_tidy <-time_producer_and_engagement_data %>% 
+  mutate(time_spent_in_producer = if_else(is.na(time_spent_in_producer),0,time_spent_in_producer)) %>% 
+  group_by(ga_session_id) %>% 
+  summarise(sum_in_producer = sum(time_spent_in_producer),
+            sum_engagement =sum(engagement_time_msec)/1000) 
+
+time_producer_and_engagement_data_tidy
+```
+
+##1.4-Load all time expend in experiment modal and other click events
+###1.4.1-Retrieve data from time in moddal from BigQuery
+```{r preprocessing, warning=F, message=F, echo=F}
+## Preprocessing
+# Set your query
+sql <- "
+SELECT 
+  param1.value.int_value AS ga_session_id,
+  param2.value.string_value AS button_ID,
+  param3.value.double_value AS timeSpentInExperimentModal
+FROM `<project_id>.<dataset_id>.events_*`,
+  UNNEST(event_params) AS param1,
+  UNNEST(event_params) AS param2,
+  UNNEST (event_params) AS param3
+WHERE event_name = 'button_clicked'
+    AND param1.key = 'ga_session_id'
+    AND param2.key = 'button_ID'
+    AND param3.key = 'timeSpentInExperimentModal'
+"
+
+# Run the query and store the data in a tibble
+time_in_modal <- bq_project_query(projectid, sql)
+
+# Download the data into a tibble
+time_in_modal_data <- bq_table_download(time_in_modal)
+
+time_in_modal_data
+```
+###1.4.2-Wrangle data to sum time in modal
+```{r preprocessing, warning=F, message=F, echo=F}
+
+time_in_modal_data_tidy <- time_in_modal_data %>% 
+  group_by(ga_session_id) %>% 
+  summarise(time_in_modal = sum(timeSpentInExperimentModal)) %>% 
+  mutate(time_in_modal = if_else(is.na(time_in_modal),0,time_in_modal))
+
+
+```
+##1.5-Load all add to cart data
+```{r preprocessing, warning=F, message=F, echo=F}
+## Preprocessing
+# Set your query
+sql <- "
+SELECT 
+  param1.value.int_value AS ga_session_id,
+  param2.item_id,
+  param3.item_name,
+  param4.item_brand,
+  param5.price
+FROM `<project_id>.<dataset_id>.events_*`,
+  UNNEST(event_params) AS param1,
+  UNNEST(items) AS param2,
+  UNNEST(items) AS param3,
+  UNNEST(items) AS param4,
+  UNNEST(items) AS param5
+WHERE event_name = 'add_to_cart'
+    AND param1.key = 'ga_session_id'
+"
+
+# Run the query and store the data in a tibble
+add_to_cart <- bq_project_query(projectid, sql)
+
+# Download the data into a tibble
+add_to_cart_data <- bq_table_download(add_to_cart)
+
+add_to_cart_data
+```
+###1.4.2-Wrangle add to cart data
+```{r preprocessing, warning=F, message=F, echo=F}
+
+add_to_cart_data_tidy <- add_to_cart_data %>% 
+  mutate(price = if_else(is.na(price),0,price)) %>% 
+  group_by(ga_session_id) %>% 
+  summarise(amount_of_add_to_cart = n_distinct(item_id),
+            amount_of_unique_producers = n_distinct(item_brand),
+            value_of_all_products_added = sum(price))
+
+add_to_cart_data_tidy
+
+```
+
+##1.6-Load all begin checkout data
+```{r preprocessing, warning=F, message=F, echo=F}
+## Preprocessing
+# Set your query
+sql <- "
+SELECT 
+  param1.value.int_value AS ga_session_id,
+  param2.value.int_value AS value,
+  ecommerce.total_item_quantity AS unique_items
+FROM `<project_id>.<dataset_id>.events_*`,
+  UNNEST(event_params) AS param1,
+  UNNEST(event_params) AS param2
+WHERE event_name = 'begin_checkout'
+    AND param1.key = 'ga_session_id'
+    AND param2.key = 'value'
+"
+
+# Run the query and store the data in a tibble
+begin_checkout <- bq_project_query(projectid, sql)
+
+# Download the data into a tibble
+begin_checkout_data <- bq_table_download(begin_checkout)
+
+begin_checkout_data
+```
+###1.6.2-Wrangle begin checkout data
+```{r preprocessing, warning=F, message=F, echo=F}
+
+begin_checkout_data_tidy <- begin_checkout_data %>% 
+  group_by(ga_session_id) %>% 
+  summarise(value_begin_checkout = max(value),
+            unique_items_begin_checkout = max(unique_items),
+            check_out_boolean = as.integer(1))
+
+begin_checkout_data_tidy
+
+```
+
+
+
+##1.7-Load all begin purchase
+```{r preprocessing, warning=F, message=F, echo=F}
+## Preprocessing
+# Set your query
+sql <- "
+SELECT 
+  param1.value.int_value AS ga_session_id,
+  event_date AS event_date,
+  param3.value.string_value AS transaction_id,
+  param2.value.int_value AS value,
+  ecommerce.total_item_quantity AS unique_items
+FROM `<project_id>.<dataset_id>.events_*`,
+  UNNEST(event_params) AS param1,
+  UNNEST(event_params) AS param2,
+  UNNEST(event_params) AS param3
+WHERE event_name = 'purchase'
+    AND param1.key = 'ga_session_id'
+    AND param2.key = 'value'
+    AND param3.key = 'transaction_id'
+"
+
+# Run the query and store the data in a tibble
+purchase <- bq_project_query(projectid, sql)
+
+# Download the data into a tibble
+purchase_data <- bq_table_download(purchase)
+
+purchase_data
+```
+###1.7.2-Wrangle purchase checkout data
+```{r preprocessing, warning=F, message=F, echo=F}
+
+purchase_data_tidy <- purchase_data %>% 
+  mutate(event_date = as.Date(event_date, format = "%Y%m%d")) %>% 
+  group_by(ga_session_id) %>% 
+  summarise(purchase_date = max(event_date),
+            value_purchase = max(value),
+            unique_items_purchase = max(unique_items),
+            purchase_boolean = as.integer(1))
+
+purchase_data_tidy
+```
+
+
+
+#2-Join and tidy all datasets into a single dataframe
+```{r preprocessing, warning=F, message=F, echo=F}
+
+# Here I am joining the experiment case and time in producer to the sessions dataframe
+sessions_data_tidy <- sessions_data %>% 
+  left_join(experiment_data_tidy,by='ga_session_id',) %>% 
+  left_join(time_producer_and_engagement_data_tidy,by='ga_session_id') %>% 
+  left_join(time_in_modal_data_tidy, by='ga_session_id') %>% 
+  left_join(add_to_cart_data_tidy, by='ga_session_id') %>%
+  left_join(begin_checkout_data_tidy, by='ga_session_id' ) %>% 
+  left_join(purchase_data_tidy, by='ga_session_id' ) %>% 
+  # Tidy data 
+  mutate(experiment_case = as.character(if_else(is.na(experiment_case),-1,experiment_case)),
+         sum_in_producer = if_else(is.na(sum_in_producer),0,sum_in_producer),
+         sum_engagement = if_else(is.na(sum_engagement),0,sum_engagement),
+         user_id = if_else(is.na(user_id),'-1',user_id),
+         time_in_modal = if_else(is.na(time_in_modal),0,time_in_modal),
+         event_date = as.Date(event_date, format = "%Y%m%d"),
+         amount_of_add_to_cart = if_else(is.na(amount_of_add_to_cart),0,amount_of_add_to_cart),
+         amount_of_unique_producers = if_else(is.na(amount_of_unique_producers),0,amount_of_unique_producers),
+         value_of_all_products_added = if_else(is.na(value_of_all_products_added),0,value_of_all_products_added)
+         ) %>% 
+  # Then aggregate the data per session
+  group_by(ga_session_id) %>% 
+  summarise(user_pseudo_id = unique(user_pseudo_id),
+            user_id = unique(user_id),
+            event_date = unique(event_date),
+            country = unique(country),
+            experiment_case = unique(experiment_case),
+            sum_in_producer = sum(sum_in_producer),
+            sum_engagement = sum(sum_engagement),
+            time_in_modal = max(time_in_modal),
+            amount_of_add_to_cart = max(amount_of_add_to_cart),
+            amount_of_unique_producers = max(amount_of_unique_producers),
+            value_of_all_products_added = max(value_of_all_products_added),
+            begin_checkout_boolean = max(check_out_boolean),
+            begin_checkout_value = max(value_begin_checkout),
+            begin_checkout_amount_items = max(unique_items_begin_checkout),
+            purchase_boolean = max(purchase_boolean),
+            purchase_value = max(value_purchase),
+            purchase_amount_items = max(unique_items_purchase),
+            min_purchase_date = min(purchase_date)
+            ) %>% 
+  mutate(begin_checkout_boolean = if_else(is.na(begin_checkout_boolean),0,begin_checkout_boolean),
+         begin_checkout_value = if_else(is.na(begin_checkout_value),0,begin_checkout_value),
+         begin_checkout_amount_items = if_else(is.na(begin_checkout_amount_items),0,begin_checkout_amount_items),
+         purchase_boolean = if_else(is.na(purchase_boolean),0,purchase_boolean),
+         purchase_value = if_else(is.na(purchase_value),0,purchase_value),
+         purchase_amount_items = if_else(is.na(purchase_amount_items),0,purchase_amount_items),
+         min_purchase_date = if_else(is.na(min_purchase_date),coalesce(min_purchase_date, Sys.Date()),min_purchase_date)) %>% 
+  filter(!is.na(as.integer(user_id)))#I get rid of the one instance where there non integer values
+
+sd = 3*sd(sessions_data_tidy$sum_in_producer)
+
+
+#I add all the known users from different devices
+users_id_data_tidy <- sessions_data_tidy %>% 
+  group_by(user_id) %>% 
+  summarise(user_pseudo_id =max(user_pseudo_id),
+            max_event_date = max(event_date),
+            min_event_date = min(event_date),
+            experiment_case = max(experiment_case),
+            country = max(country),
+            amount_of_session = n(),
+            sum_in_producer=sum(sum_in_producer),
+            sum_engagement=sum(sum_engagement),
+            time_in_modal = sum(time_in_modal),
+            amount_of_add_to_cart = sum(amount_of_add_to_cart),
+            amount_of_unique_producers = sum(amount_of_unique_producers),
+            value_of_all_products_added = sum(value_of_all_products_added),
+            amount_of_checkouts = sum(begin_checkout_boolean),
+            value_of_checkouts = sum(begin_checkout_value),
+            items_in_checkouts = sum(begin_checkout_amount_items),
+            amount_of_purchases = sum(purchase_boolean),
+            value_of_purchases = sum(purchase_value),
+            items_in_purchases = sum(purchase_amount_items),
+            min_purchase_date = min(min_purchase_date)) %>% 
+  filter(as.integer(user_id)>=1)
+
+# Here I create the df that summarises the information per user
+users_data_tidy <- sessions_data_tidy %>%  
+  group_by(user_pseudo_id) %>% 
+  summarise(user_id =max(user_id),
+            max_event_date = max(event_date),
+            min_event_date = min(event_date),
+            experiment_case = max(experiment_case),
+            country = max(country),
+            amount_of_session = n(),
+            sum_in_producer=sum(sum_in_producer),
+            sum_engagement=sum(sum_engagement),
+            time_in_modal = sum(time_in_modal),
+            amount_of_add_to_cart = sum(amount_of_add_to_cart),
+            amount_of_unique_producers = sum(amount_of_unique_producers),
+            value_of_all_products_added = sum(value_of_all_products_added),
+            amount_of_checkouts = sum(begin_checkout_boolean),
+            value_of_checkouts = sum(begin_checkout_value),
+            items_in_checkouts = sum(begin_checkout_amount_items),
+            amount_of_purchases = sum(purchase_boolean),
+            value_of_purchases = sum(purchase_value),
+            items_in_purchases = sum(purchase_amount_items),
+            min_purchase_date = min(min_purchase_date)) %>% 
+  filter(!as.integer(user_id)>=1) %>% 
+  bind_rows(users_id_data_tidy) #apend the users with id
+
+
+#experiment_data_tidy
+#time_producer_and_engagement_data_tidy
+```
+
+#3 Define Data for Data Analysis HERE!!!
+#3.1. Filter the data and define variables in a single place here
+```{r preprocessing, warning=F, message=F, echo=F}
+#Filter all users that had purchases before this date
+variable_min_event_date =  as.Date('2023-09-01')
+
+#Filter all users that had events before this date
+variable_max_event_date = as.Date('2024-01-01')
+
+#Filter all users that stay extremly long time in producers
+#In case I need to filter after certaing amount of time in producer (I should change this to get rid of outliers in time_in_producer)
+variable_outlier_sum_in_producer = 3*sd(users_data_tidy_filtered$sum_in_producer)
+variable_outlier_sessions = 3*sd(users_data_tidy_filtered$amount_of_session)
+variable_outlier_purchase = 3*sd(users_data_tidy_filtered$value_of_purchases)
+
+
+users_data_tidy_filtered <- users_data_tidy %>% 
+  filter(country == 'Costa Rica',
+         experiment_case != -1,
+         min_event_date >= variable_min_event_date,
+         min_event_date < variable_max_event_date,) %>%
+  arrange(min_event_date)
+
+
+users_data_tidy_filtered
+```
+#3.2 - Look at the filtered data
+```{r preprocessing, warning=F, message=F, echo=F}
+# Here I am just exploring the data
+users_data_tidy_filtered %>%
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            total_amount_session = sum(amount_of_session),
+            total_time_producer = sum(sum_in_producer),
+            total_engagement = sum(sum_engagement),
+            sum_time_in_modal = sum(time_in_modal),
+            sum_amount_of_add_to_cart = sum(amount_of_add_to_cart),
+            sum_amount_of_unique_producers = sum(amount_of_unique_producers),
+            sum_value_of_all_products_added = sum(value_of_all_products_added),
+            sum_amount_of_checkouts = sum(amount_of_checkouts),
+            sum_value_of_checkouts = sum(value_of_checkouts),
+            sum_items_in_checkots = sum(items_in_checkouts),
+            sum_amount_of_purchases = sum(amount_of_purchases),
+            sum_value_of_purchases = sum(value_of_purchases),
+            sum_items_in_purchases = sum(items_in_purchases))
+
+users_data_tidy_filtered %>% 
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            amount_of_logged_in_users = n_distinct(user_id),
+            mean_amount_session = mean(amount_of_session),
+            mean_time_producer = mean(sum_in_producer),
+            mean_engagement = mean(sum_engagement),
+            mean_time_in_modal = mean(time_in_modal),
+            mean_amount_of_add_to_cart = mean(amount_of_add_to_cart),
+            mean_amount_of_unique_producers = mean(amount_of_unique_producers),
+            mean_value_of_all_products_added = mean(value_of_all_products_added),
+            mean_amount_of_checkouts = mean(amount_of_checkouts),
+            mean_value_of_checkouts = mean(value_of_checkouts),
+            mean_items_in_checkots = mean(items_in_checkouts),
+            mean_amount_of_purchases = mean(amount_of_purchases),
+            mean_value_of_purchases = mean(value_of_purchases),
+            mean_items_in_purchases = mean(items_in_purchases))
+
+session_data %>%
+  filter(country=='Costa Rica') %>% 
+  group_by(user_id) %>%
+  summarise(amount_of_user_pseudo_id = n_distinct(user_pseudo_id)) %>% 
+  group_by(amount_of_user_pseudo_id) %>% 
+  summarise(count = n())
+  
+
+
+
+sd(users_data_tidy_filtered$sum_in_producer)
+```
+
+
+#3.4 Descriptive Statistics
+```{r preprocessing, warning=F, message=F, echo=F}
+# Here I am joining the experiment case and time in producer to the sessions dataframe
+
+last_event_date <- as.Date('2024-01-01')
+
+print(paste('total amount of sessions', nrow(sessions_data_tidy)))
+print(paste('amount of sessions after',variable_min_event_date,':', nrow(
+  sessions_data_tidy %>% 
+    filter(event_date > variable_min_event_date)
+  )))
+print(paste('amount of sessions after',variable_min_event_date,'and before',last_event_date,':', nrow(
+  sessions_data_tidy %>% 
+    filter(event_date > variable_min_event_date,
+           event_date < last_event_date)
+  )))
+
+print(paste('amount of sessions after',variable_min_event_date,'and before',last_event_date,'from Costa Rica:', nrow(
+  sessions_data_tidy %>% 
+    filter(event_date > variable_min_event_date,
+           event_date < last_event_date,
+           country == 'Costa Rica')
+  )))
+
+
+print(paste('amount of users after',variable_min_event_date,'and before',last_event_date,'from Costa Rica that never user the platform before',last_event_date,':', nrow(
+  sessions_data_tidy %>% 
+    filter(event_date > variable_min_event_date,
+           event_date < last_event_date,
+           country == 'Costa Rica') %>% 
+    group_by(user_pseudo_id)
+  )))
+
+print(paste('total amount of users', nrow(users_data_tidy)))
+print(paste('amount of users with first visit after',variable_min_event_date,':', nrow(
+  users_data_tidy %>% 
+    filter(experiment_case != -1,
+           min_event_date > variable_min_event_date)
+  )))
+
+
+variable_max_event_date
+
+
+print(paste('amount of sessions after',variable_min_event_date,'and before',variable_max_event_date,':', nrow(
+  users_data_tidy %>% 
+    filter(experiment_case != -1,
+           min_event_date > variable_min_event_date,
+           max_event_date < variable_max_event_date)
+  )))
+
+print(paste('amount of sessions after',variable_min_event_date,'and before',variable_max_event_date,'from Costa Rica:', nrow(
+  users_data_tidy %>% 
+    filter(country == 'Costa Rica',
+         experiment_case != -1,
+         min_event_date >= variable_min_event_date,
+         max_event_date < variable_max_event_date)
+  )))
+
+```
+
+
+#4-Visualize
+#4.1-Filter data for analysis
+```{r preprocessing, warning=F, message=F, echo=F}
+# Using ggplot2 for the scatter plot
+if (!require(ggplot2)) install.packages("ggplot2")
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(patchwork)) install.packages("patchwork")
+
+
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(flexplot)
+
+
+users_data_tidy_filtered
+
+a=flexplot( sum_in_producer~1, data=users_data_tidy_filtered)
+b=flexplot(amount_of_session~1, data=users_data_tidy_filtered)
+c=flexplot(value_of_purchases~1, data=users_data_tidy_filtered)
+require(cowplot)
+plot_grid(a,b,c, nrow=3)
+
+a=flexplot(amount_of_session~experiment_case, data=users_data_tidy_filtered, method = "poisson", jitter = c(0,1))
+b=flexplot(experiment_case~amount_of_session, data=users_data_tidy_filtered, method = "poisson", jitter = c(0,0))
+plot_grid(a,b, nrow=1)
+
+
+
+
+```
+
+#4.2-Visualize Time in Producers
+```{r preprocessing, warning=F, message=F, echo=F}
+#Q-Q Plot of log(Time in Producer) with sum_in_producer > variable_min_time_in_producer
+hist_log_plot_time_producer <- users_data_tidy_filtered %>% 
+  ggplot(aes(x = (log(sum_in_producer)+1), fill = as.factor(experiment_case))) +
+  geom_histogram(binwidth = 1, position = "dodge") +  # Adjust binwidth as needed
+  facet_wrap(~experiment_case) +  # Create separate plots for each experiment_case
+  labs(x = "Time in Producer", y = "Frequency", fill = "Experiment Case") +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+                               plot.margin = margin(1, 1, 1, 1, "cm")) +  # Adjust margins as needed 
+  ggtitle(paste("Histogram of log(Time in Producer) with sum_in_producer >", variable_min_time_in_producer))
+
+
+#Q-Q Plot of Time in Producer with sum_in_producer > variable_min_time_in_producer
+q_q_plot_time_producer <-  users_data_tidy_filtered %>% 
+  ggplot(aes(sample = sum_in_producer)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~experiment_case) +  # Separate plots for each experiment_case
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+                               plot.margin = margin(1, 1, 1, 1, "cm")) +  # Adjust margins as needed 
+  ggtitle(paste("Q-Q Plot of Time in Producer with sum_in_producer >", variable_min_time_in_producer))
+
+
+#Q-Q Plot of log(Time in Producer) with sum_in_producer > variable_min_time_in_producer
+hist_plot_time_producer <- users_data_tidy_filtered %>% 
+  ggplot(aes(x = (sum_in_producer), fill = as.factor(experiment_case))) +
+  geom_histogram(binwidth = 1, position = "dodge") +  # Adjust binwidth as needed
+  facet_wrap(~experiment_case) +  # Create separate plots for each experiment_case
+  labs(x = "Time in Producer", y = "Frequency", fill = "Experiment Case") +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+                               plot.margin = margin(1, 1, 1, 1, "cm")) + # Adjust margins as needed
+  ggtitle(paste("Histogram of Time in Producer with sum_in_producer >", variable_min_time_in_producer))
+
+
+#Q-Q Plot of log(Time in Producer) with sum_in_producer > variable_min_time_in_producer
+q_q_log_plot_time_producer <- users_data_tidy_filtered %>% 
+  ggplot(aes(sample = log(sum_in_producer)+1)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~experiment_case) +  # Separate plots for each experiment_case
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+                               plot.margin = margin(1, 1, 1, 1, "cm")) +  # Adjust margins as needed 
+  ggtitle(paste("Q-Q Plot of log(Time in Producer) with sum_in_producer >", variable_min_time_in_producer))
+
+print(q_q_plot_time_producer)
+print(q_q_log_plot_time_producer)
+print(hist_plot_time_producer)
+print(hist_log_plot_time_producer)
+```
+
+#4.3-Visualize Amount of Sessions
+```{r preprocessing, warning=F, message=F, echo=F}
+#Q-Q Plot of log(Time in Producer) with sum_in_producer > variable_min_time_in_producer
+hist_log_plot_amount_sessions <- users_data_tidy_filtered %>% 
+  ggplot(aes(x = (log(amount_of_session)+1), fill = as.factor(experiment_case))) +
+  geom_histogram(binwidth = 1, position = "dodge") +  # Adjust binwidth as needed
+  facet_wrap(~experiment_case) +  # Create separate plots for each experiment_case
+  labs(x = "Time in Producer", y = "Frequency", fill = "Experiment Case") +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+                               plot.margin = margin(1, 1, 1, 1, "cm")) +  # Adjust margins as needed 
+  ggtitle(paste("Histogram of log(amount_of_session) with sum_in_producer >", variable_min_time_in_producer))
+
+
+#Q-Q Plot of Time in Producer with sum_in_producer > variable_min_time_in_producer
+q_q_plot_amount_sessions <-  users_data_tidy_filtered %>% 
+  ggplot(aes(sample = amount_of_session)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~experiment_case) +  # Separate plots for each experiment_case
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+                               plot.margin = margin(1, 1, 1, 1, "cm")) +  # Adjust margins as needed 
+  ggtitle(paste("Q-Q Plot of amount_of_session with sum_in_producer >", variable_min_time_in_producer))
+
+
+#Q-Q Plot of log(Time in Producer) with sum_in_producer > variable_min_time_in_producer
+hist_plot_amount_sessions<- users_data_tidy_filtered %>% 
+  ggplot(aes(x = (amount_of_session), fill = as.factor(experiment_case))) +
+  geom_histogram(binwidth = 1, position = "dodge") +  # Adjust binwidth as needed
+  facet_wrap(~experiment_case) +  # Create separate plots for each experiment_case
+  labs(x = "Time in Producer", y = "Frequency", fill = "Experiment Case") +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+                               plot.margin = margin(1, 1, 1, 1, "cm")) + # Adjust margins as needed
+  ggtitle(paste("Histogram of amount_of_session with sum_in_producer >", variable_min_time_in_producer))
+
+
+#Q-Q Plot of log(Time in Producer) with sum_in_producer > variable_min_time_in_producer
+q_q_log_plot_amount_sessions <- users_data_tidy_filtered %>% 
+  ggplot(aes(sample = log(amount_of_session)+1)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~experiment_case) +  # Separate plots for each experiment_case
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+                               plot.margin = margin(1, 1, 1, 1, "cm")) +  # Adjust margins as needed 
+  ggtitle(paste("Q-Q Plot of log(amount_of_session) with sum_in_producer >", variable_min_time_in_producer))
+
+print(q_q_plot_amount_sessions)
+print(q_q_log_plot_amount_sessions)
+print(hist_plot_amount_sessions)
+print(hist_log_plot_amount_sessions) 
+```
+#4.4- Visualize Purchase Events
+```{r preprocessing, warning=F, message=F, echo=F}
+# Using ggplot2 for the scatter plot
+
+users_data_tidy_filtered %>%
+  filter(value_of_purchases > 0) %>% 
+  ggplot(aes(x = value_of_purchases/100, fill = as.factor(experiment_case))) +
+  geom_histogram(binwidth = 1, position = "dodge") +  # Adjust binwidth as needed
+  facet_wrap(~experiment_case) +  # Create separate plots for each experiment_case
+  labs(x = "value_of_purchases/10000", y = "Frequency", fill = "Experiment Case") +
+  theme_minimal()
+
+
+users_data_tidy_filtered %>%
+  filter(amount_of_purchases>0) %>% 
+  ggplot(aes(x = value_of_purchases, y = sum_in_producer, color=experiment_case, shape=experiment_case)) +  # Corrected this line
+  geom_point() +
+  labs(x = "Value of Purchase", y = "Time in Producer", title = "Add to Cart vs. Producer Sum") +
+  theme_minimal()  # This applies a minimal theme to the plot
+
+
+users_data_tidy_filtered %>% 
+  filter(amount_of_purchases > 0)
+
+users_data_tidy_filtered %>%
+  filter(amount_of_purchases>0) %>% 
+  ggplot(aes(x = items_in_purchases, y = sum_in_producer, color=experiment_case, shape=experiment_case)) +  # Corrected this line
+  geom_point() +
+  labs(x = "Value of Purchase", y = "Time in Producer", title = "Add to Cart vs. Producer Sum") +
+  theme_minimal()  # This applies a minimal theme to the plot
+
+users_data_tidy_filtered %>%
+  ggplot(aes(x = amount_of_session, y = sum_in_producer, color=experiment_case, shape=experiment_case)) +  # Corrected this line
+  geom_point() +
+  labs(x = "Amount of sessions", y = "Time in Producer", title = "Time in Producer vs Amount of Sessions") +
+  theme_minimal()  # This applies a minimal theme to the plot
+
+
+
+```
+#4.5-Visualize Amount of Time Vs Purchase
+```{r preprocessing, warning=F, message=F, echo=F}
+
+
+```
+#5-Hypothesis Testing
+#5.2-Visualize Hypothesis
+#5.2.1-Hypothesis 1,....
+```{r preprocessing, warning=F, message=F, echo=F}
+#Purchased data aggregated by user
+
+users_data_tidy_filtered %>% 
+ggplot(aes(x = experiment_case, y = log(sum_in_producer+1))) +
+  geom_boxplot() +  # Add points
+  labs(x = "experiment_case", y = "log(Time in Producers + 1)",
+       title = "Experiment case vs Time in Producer") +
+  theme_minimal()  # Minimal theme for aesthetics  
+
+users_data_tidy_filtered %>% 
+ggplot(aes(x = experiment_case, y = amount_of_session)) +
+  geom_boxplot() +  # Add points
+  labs(x = "experiment_case", y = "Sum of Amount of Sessions per user",
+       title = "Sum of Amount of Sessions per user") +
+  theme_minimal()  # Minimal theme for aesthetics  
+
+users_data_tidy_filtered %>% 
+  filter(value_of_purchases>0) %>% 
+ggplot(aes(x = experiment_case, y = value_of_purchases)) +
+  geom_boxplot() +  # Add points
+  labs(x = "experiment_case", y = "Sum of Amount of Sessions per user",
+       title = "Sum of Amount of Sessions per user") +
+  theme_minimal()  # Minimal theme for aesthetics  
+
+users_data_tidy_filtered %>% 
+  filter(value_of_all_products_added>0) %>% 
+ggplot(aes(x = experiment_case, y = value_of_all_products_added)) +
+  geom_boxplot() +  # Add points
+  labs(x = "experiment_case", y = "Sum of all products added to cart in CRC",
+       title = "Sum of all products added to cart per user") +
+  theme_minimal()  # Minimal theme for aesthetics  
+
+users_data_tidy_filtered %>% 
+  filter(value_of_checkouts>0) %>% 
+ggplot(aes(x = experiment_case, y = value_of_checkouts)) +
+  geom_boxplot() +  # Add points
+  labs(x = "experiment_case", y = "Value of Checkouts in CRC",
+       title = "Sum of all of Checkouts per user") +
+  theme_minimal()  # Minimal theme for aesthetics  
+
+```
+
+
+#5.3-Hypothesis Statistical Testing
+#5.3.0- Descriptive statistics
+```{r preprocessing, warning=F, message=F, echo=F}
+print(paste('amount of sessions after',variable_min_event_date,'and before',variable_max_event_date,':',nrow(
+  sessions_data_tidy %>% 
+  filter(event_date>variable_min_event_date,
+         event_date<variable_max_event_date)
+)))
+print(paste('amount of users after',variable_min_event_date,'and before',variable_max_event_date,':',nrow(
+  users_data_tidy %>% 
+  filter(min_event_date>variable_min_event_date)
+)))
+
+print(paste('amount of users from Costa Rica with first visit after',variable_min_event_date,'and before',variable_max_event_date,':',nrow(
+  users_data_tidy %>% 
+  filter(experiment_case!=-1,
+         min_event_date>=variable_min_event_date,
+         min_event_date<variable_max_event_date)
+)))
+
+print(paste('amount of users from Costa Rica with first visit after',variable_min_event_date,'and before',variable_max_event_date,':',nrow(
+  users_data_tidy %>% 
+  filter(experiment_case!=-1,
+         min_event_date>=variable_min_event_date,
+         min_event_date<variable_max_event_date,
+         country=='Costa Rica')
+)))
+
+
+print(paste('mean time in producer information from all users',mean(users_data_tidy_filtered$sum_in_producer),'with an SD of',sd(users_data_tidy_filtered$sum_in_producer),'with a total sample size of',nrow(users_data_tidy_filtered)))
+print(paste('mean amount of session from all users',mean(users_data_tidy_filtered$amount_of_session),'with an SD of',sd(users_data_tidy_filtered$amount_of_session),'with a total sample size of',nrow(users_data_tidy_filtered)))
+print(paste('mean value of pruchases from all users',mean(users_data_tidy_filtered$value_of_purchases),'with an SD of',sd(users_data_tidy_filtered$value_of_purchases),'with a total sample size of',nrow(users_data_tidy_filtered)))
+
+users_data_tidy_filtered %>% 
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            mean_time_producer = mean(sum_in_producer),
+            SD_time_producer = sd(sum_in_producer))
+
+users_data_tidy_filtered %>% 
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            mean_amount_of_session = mean(amount_of_session),
+            SD_amount_of_session = sd(amount_of_session))
+
+users_data_tidy_filtered %>% 
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            mean_value_of_purchases = mean(value_of_purchases),
+            SD_value_of_purchases = sd(value_of_purchases))
+
+users_data_tidy_filtered %>% 
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            mean_amount_of_purchases = mean(amount_of_purchases),
+            SD_amount_of_purchases = sd(amount_of_purchases))
+
+users_data_tidy_filtered %>% 
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            mean_value_of_value_of_checkouts = mean(value_of_checkouts),
+            SD_value_of_value_of_checkouts = sd(value_of_checkouts))
+
+users_data_tidy_filtered %>% 
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            mean_amount_of_checkouts = mean(amount_of_checkouts),
+            SD_amount_of_checkouts = sd(amount_of_checkouts))
+
+
+users_data_tidy_filtered %>% 
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            mean_value_of_all_products_added = mean(value_of_all_products_added),
+            SD_value_of_all_products_added = sd(value_of_all_products_added))
+
+users_data_tidy_filtered %>% 
+  group_by(experiment_case) %>% 
+  summarise(amount_of_users = n(),
+            mean_amount_of_add_to_cart = mean(amount_of_add_to_cart),
+            SD_amount_of_add_to_cart = sd(amount_of_add_to_cart))
+```
+
+#5.3.1-Checking for Assumptions
+```{r preprocessing, warning=F, message=F, echo=F}
+#Purchased data aggregated by user
+
+# Install and load the necessary packages
+if (!require(MASS)) install.packages("MASS")
+if (!require(dplyr)) install.packages("dplyr")
+
+library(MASS)
+library(dplyr)
+
+# Define the variable of interest
+variable_of_interest <- "sum_in_producer"
+
+# Define the experiment cases of interest
+experiment_cases_of_interest <- c(0, 1, 2)
+
+# Initialize an empty list to store results
+results <- list()
+
+# Specify a small constant to add (adjust based on your data's scale)
+small_constant <- 1
+
+users_data_tidy_filtered_sum_log <- users_data_tidy_filtered %>% 
+  mutate(sum_in_producer = log(sum_in_producer+1))
+
+
+# Loop through each specified experiment_case
+for(case in experiment_cases_of_interest) {
+  # Subset the data for the current case
+  subset_data <- users_data_tidy_filtered %>%
+    dplyr::select(variable_of_interest) %>%
+    na.omit()  # Remove missing values
+
+  # Shift the data by adding a small constant to ensure positivity
+  subset_data[[variable_of_interest]] <- subset_data[[variable_of_interest]] + small_constant
+
+  # Finding the optimal lambda for Box-Cox transformation
+  bc <- boxcox(subset_data[[variable_of_interest]] ~ 1, plotit = FALSE)
+  lambda_optimal <- bc$x[which.max(bc$y)]
+  
+  # Applying the Box-Cox transformation
+  if (lambda_optimal != 0) {
+    subset_data[[variable_of_interest]] <- (subset_data[[variable_of_interest]]^lambda_optimal - 1) / lambda_optimal
+  } else {
+    subset_data[[variable_of_interest]] <- log(subset_data[[variable_of_interest]])
+  }
+  
+  # Check if there's enough data to perform the test
+  if(length(subset_data[[variable_of_interest]]) > 3) {
+    # Perform the Shapiro-Wilk test on the Box-Cox transformed data
+    test_result <- shapiro.test(subset_data[[variable_of_interest]])
+    results[[as.character(case)]] <- test_result  # Store results
+  } else {
+    results[[as.character(case)]] <- "Not enough data for the test"
+  }
+}
+
+# View results
+print(results)
+
+
+
+```
+
+
+
+#5.3.2-MANOVA Testing
+```{r preprocessing, warning=F, message=F, echo=F}
+# Install and load the necessary packages
+if (!require(MASS)) install.packages("MASS")
+library(MASS)
+
+print("-----------------MANOVA-----------------")
+mod <- manova(cbind(sum_in_producer, amount_of_session, value_of_purchases) ~ experiment_case, data = users_data_tidy_filtered)
+summary(mod)
+```
+
+
+#5.3.3-Poshoc Value for sum_in_producer
+```{r preprocessing, warning=F, message=F, echo=F}
+print("-----------------Visualize-----------------")
+linear=lm(sum_in_producer+1~experiment_case, data=users_data_tidy_filtered)
+gm_gamma=glm(sum_in_producer+1~experiment_case, data=users_data_tidy_filtered, family = Gamma())
+compare.fits(sum_in_producer+1~experiment_case, data=users_data_tidy_filtered, model1 = linear, model2 = gm_gamma)
+
+a=flexplot(sum_in_producer~experiment_case, data=users_data_tidy_filtered, method = "Gamma", jitter = c(1,0.5))
+a
+plot_grid(a,b, nrow=1)
+
+print("-----------------ANOVA: sum_in_producer-----------------")
+anova_sum_in_product <- aov(log(sum_in_producer+1) ~ experiment_case, data = users_data_tidy_filtered)
+summary(anova_sum_in_product)
+
+print(paste('AIC of anova_sum_in_product:',AIC(anova_sum_in_product)))
+print("-----------------glm_gaussian: sum_in_producer-----------------")
+# Fitting a Gamma regression model
+# glm_sum_in_product_gaussian_log <- glm(sum_in_producer +1 ~ as.factor(experiment_case),
+#                                     family = gaussian(link = "log"),
+#                                     data = users_data_tidy_filtered)
+glm_sum_in_product_gaussian_identity <- glm(log(sum_in_producer+1) ~ as.factor(experiment_case),
+                                         family = gaussian(link = "identity"),
+                                         data = users_data_tidy_filtered)
+
+# glm_sum_in_product_gaussian_inverse <- glm(log(sum_in_producer+1) ~ as.factor(experiment_case),
+#                                         family = gaussian(link = "inverse"),
+#                                         data = users_data_tidy_filtered)
+
+
+# 
+# print(paste('AIC of glm_sum_in_product_gaussian_log:',AIC(glm_sum_in_product_gaussian_log)))
+print(paste('AIC of glm_sum_in_product_gaussian_identity:',AIC(glm_sum_in_product_gaussian_identity)))
+# print(paste('AIC of glm_sum_in_product_gaussian_inverse:',AIC(glm_sum_in_product_gaussian_inverse)))
+# Viewing the summary of the model
+ summary(glm_sum_in_product_gaussian_identity)
+
+print("-----------------glm_Gamma: sum_in_producer-----------------")
+# Fitting a Gamma regression model
+# glm_sum_in_product_gamma <- glm(sum_in_producer +1 ~ as.factor(experiment_case),
+#                                     family = Gamma(),
+#                                     data = users_data_tidy_filtered)
+# 
+# summary(glm_sum_in_product_gamma)
+
+# glm_sum_in_product_gamma_log <- glm(sum_in_producer +1 ~ as.factor(experiment_case),
+#                                     family = Gamma(link = "log"),
+#                                     data = users_data_tidy_filtered)
+# glm_sum_in_product_gamma_identity <- glm(sum_in_producer+1 ~ as.factor(experiment_case),
+#                                          family = Gamma(link = "identity"),
+#                                          data = users_data_tidy_filtered)
+
+# glm_sum_in_product_gamma_inverse <- glm(sum_in_producer+1 ~ as.factor(experiment_case),
+#                                         family = Gamma(link = "inverse"),
+#                                         data = users_data_tidy_filtered)
+# 
+# print(paste('AIC of glm_sum_in_product_gamma_log:',AIC(glm_sum_in_product_gamma_log)))
+print(paste('AIC of glm_sum_in_product_gamma_identity:',AIC(glm_sum_in_product_gamma_identity)))
+# print(paste('AIC of glm_sum_in_product_gamma_inverse:',AIC(glm_sum_in_product_gamma_inverse)))
+# Viewing the summary of the model
+summary(glm_sum_in_product_gamma_identity)
+
+# model.comparison(glm_sum_in_product_gamma_identity,sum_in_producer_cpglm_identity)
+
+print("-----------------Tweedie_(cpglm)sum_in_producer-----------------")
+sum_in_producer_cpglm_identity <- cpglm(sum_in_producer+1 ~ experiment_case, 
+                     data = users_data_tidy_filtered, 
+                     link = "identity")
+# sum_in_producer_cpglm_log <- cpglm(sum_in_producer+1 ~ experiment_case, 
+#                      data = users_data_tidy_filtered, 
+#                      link = "log")
+# sum_in_producer_cpglm_inverse <- cpglm(sum_in_producer+1 ~ experiment_case, 
+#                      data = users_data_tidy_filtered, 
+#                      link = "inverse")
+
+
+print(paste('AIC of sum_in_producer_cpglm_identity:',AIC(sum_in_producer_cpglm_identity)))
+# print(paste('AIC of sum_in_producer_cpglm_log:',AIC(sum_in_producer_cpglm_log)))
+# print(paste('AIC of sum_in_producer_cpglm_inverse:',AIC(sum_in_producer_cpglm_inverse)))
+
+# summary(sum_in_producer_cpglm_identity)
+
+#print("-----------------sum_in_producer_cpglm_identity_case_1_and_2: sum_in_producer case 1 vs 2-----------------")
+# users_data_tidy_filtered_case_1_and_2 <-users_data_tidy_filtered %>% 
+#   filter(experiment_case!=0)
+# 
+# anova_sum_in_product_case_1_and_2 <- aov(log(sum_in_producer+1) ~ experiment_case, 
+#                                          data = users_data_tidy_filtered_case_1_and_2)
+# summary(anova_sum_in_product_case_1_and_2)
+# AIC(anova_sum_in_product)
+# 
+# sum_in_producer_cpglm_identity_case_1_and_2 <- cpglm(sum_in_producer+1 ~ experiment_case, 
+#                      data = users_data_tidy_filtered_case_1_and_2, 
+#                      link = "identity")
+# 
+# summary(sum_in_producer_cpglm_identity_case_1_and_2)
+
+
+```
+
+
+
+
+#5.3.4-Poshoc Value of Purchase analysis with cpglm
+```{r preprocessing, warning=F, message=F, echo=F}
+if (!require(statmod)) install.packages("statmod")
+if (!require(tweedie)) install.packages("tweedie")
+if (!require(cplm)) install.packages("cplm")
+# Assuming you have the 'cplm' package installed
+library(cplm)
+library(tweedie)
+library(statmod)  # for tweedie.profile
+
+amount_of_purchases_poisson <- glm(amount_of_purchases+1 ~ as.factor(experiment_case),
+                                   family = poisson(),
+                                   data = users_data_tidy_filtered_case_2_reference)
+
+amount_of_purchases_poisson <- glm(amount_of_purchases+1 ~ as.factor(experiment_case),
+                                   family = Gamma(link="identity"),
+                                   data = users_data_tidy_filtered)
+
+
+summary(amount_of_purchases_poisson)
+
+
+
+print("-----------------gaussian: value_of_session-----------------")
+# Fitting a Gamma regression model
+value_of_purchases_gaussian_identity <- glm(log(value_of_purchases+1) ~ as.factor(experiment_case), 
+                                            family = gaussian(link = "identity"), 
+                                            data = users_data_tidy_filtered)
+# value_of_purchases_gaussian_log <- glm(value_of_purchases+1 ~ as.factor(experiment_case), family = gaussian(link = "log"), data = users_data_tidy_filtered)
+# value_of_purchases_gaussian_inverse <- glm(value_of_purchases+1 ~ as.factor(experiment_case), family = gaussian(link = "inverse"), data = users_data_tidy_filtered)
+
+print(paste('AIC of value_of_purchases_gaussian_identity:',AIC(value_of_purchases_gaussian_identity)))
+# print(paste('AIC of value_of_purchases_gaussian_log:',AIC(value_of_purchases_gaussian_log)))
+# print(paste('AIC of value_of_purchases_gaussian_inverse:',AIC(value_of_purchases_gaussian_inverse)))
+
+
+# Viewing the summary of the model
+summary(value_of_purchases_gaussian_identity)
+
+
+
+
+print("-----------------gamma: value_of_session-----------------")
+# Fitting a Gamma regression model
+value_of_purchases_gamma_log <- glm(value_of_purchases+1 ~ as.factor(experiment_case), 
+                                    family = Gamma(link = "log"), 
+                                    data = users_data_tidy_filtered)
+value_of_purchases_gamma_identity <- glm(value_of_purchases+1 ~ as.factor(experiment_case), 
+                                         family = Gamma(link = "identity"), 
+                                         data = users_data_tidy_filtered)
+value_of_purchases_gamma_inverse<- glm(value_of_purchases+1 ~ as.factor(experiment_case), 
+                                       family = Gamma(link = "inverse"), 
+                                       data = users_data_tidy_filtered)
+# 
+# print(paste('AIC of value_of_purchases_gamma_log:',AIC(value_of_purchases_gamma_log)))
+# print(paste('AIC of value_of_purchases_gamma_identity:',AIC(value_of_purchases_gamma_identity)))
+# print(paste('AIC of value_of_purchases_gamma_inverse:',AIC(value_of_purchases_gamma_inverse)))
+# Viewing the summary of the model
+
+
+print("-----------------glm_tweedie: value_of_session-----------------")
+
+# Estimate the power parameter
+power_estimate <- tweedie.profile(value_of_purchases ~ as.factor(experiment_case), 
+                                  p.vec=seq(0, 3, by=0.1),
+                                  data = users_data_tidy_filtered)
+
+power_param <- power_estimate$p.max
+
+print(paste('power parameter:',power_estimate$p.max))
+
+value_of_purchases_glm_tweedie <- glm(value_of_purchases ~ experiment_case, 
+                 family = tweedie(var.power = power_param),
+                 data = users_data_tidy_filtered)
+
+summary(value_of_purchases_glm_tweedie)
+
+
+print ('----------cpglm_tweedie: value_of_session')
+
+# Fit the Compound Poisson Generalized Linear Model
+value_of_purchases_cpglm_log_identity <- cpglm(value_of_purchases ~ experiment_case, 
+                     data = users_data_tidy_filtered, 
+                     link = "identity")
+
+# Fit the Compound Poisson Generalized Linear Model
+value_of_purchases_cpglm_inverse <- cpglm(value_of_purchases ~ experiment_case, 
+                     data = users_data_tidy_filtered, 
+                     link = "inverse")
+
+# Fit the Compound Poisson Generalized Linear Model
+value_of_purchases_cpglm_log <- cpglm(value_of_purchases+1 ~ experiment_case, 
+                     data = users_data_tidy_filtered, 
+                     link = "log")
+
+
+
+
+#---------------------users_data_tidy_filtered_case_2_reference
+
+users_data_tidy_filtered_case_2_reference <- users_data_tidy_filtered %>%
+  mutate(experiment_case = as.factor(experiment_case)) %>%
+  mutate(experiment_case = relevel(experiment_case, ref = "2"))
+
+value_of_purchases_cpglm_log_identity_case_2_reference <- cpglm(value_of_purchases ~ experiment_case, 
+                     data = users_data_tidy_filtered_case_2_reference, 
+                     link = "identity")
+
+
+
+print(paste('AIC of value_of_purchases_cpglm_log_identity:',AIC(value_of_purchases_cpglm_log_identity_case_2_reference)))
+print(paste('AIC of value_of_purchases_cpglm_inverse:',AIC(value_of_purchases_cpglm_log_identity)))
+# print(paste('AIC of value_of_purchases_cpglm_log:',AIC(value_of_purchases_cpglm_log)))
+
+summary(value_of_purchases_cpglm_log_identity_case_2_reference)
+
+print ('----------cpglm_tweedie_case_1_and_2: value_of_session')
+
+value_of_purchases_cpglm_identity_identity_case_1_and_2 <- cpglm(value_of_purchases ~ experiment_case, 
+                     data = users_data_tidy_filtered_case_1_and_2_case_2_reference,
+                     link = "identity")
+
+users_data_tidy_filtered_case_1_and_2_case_2_reference <- users_data_tidy_filtered_case_1_and_2 %>% 
+  mutate(experiment_case = as.factor(experiment_case)) %>%
+  mutate(experiment_case = relevel(experiment_case, ref = "2"))
+
+AIC(value_of_purchases_cpglm_identity_identity_case_1_and_2)
+summary(value_of_purchases_cpglm_identity_identity_case_1_and_2)
+
+anova_value_of_purchases_case_1_and_2 <- aov(log(value_of_purchases+1) ~ experiment_case, data = users_data_tidy_filtered_case_1_and_2)
+AIC(anova_value_of_purchases_case_1_and_2)
+summary(anova_value_of_purchases_case_1_and_2)
+
+
+
+# ------------------------------------
+# Assuming 'model' is your fitted GLM model
+# Calculate standardized residuals
+std_residuals <- rstandard(value_of_purchases_cpglm_log_identity)
+
+# Extract residuals from the model
+residuals <- residuals(value_of_purchases_cpglm_log_identity)
+
+# You need to obtain the standard errors of the residuals. This might be done by looking at the
+# summary or the model object itself to see if standard errors are available. This is just an example:
+std_errors <- sqrt(summary(value_of_purchases_cpglm_log_identity)$dispersion)
+
+# Now, calculate the standardized residuals
+std_residuals <- residuals / std_errors
+
+# From here, you would follow the previously given code to filter your data.
+
+
+# Create a logical vector where TRUE indicates a standardized residual greater than 3
+high_residuals <- abs(std_residuals) > 2
+
+# Subset your original data frame to only include these high-residual observations
+high_residuals_df <- users_data_tidy_filtered[high_residuals, ]
+
+# Print the new data frame with outliers
+print(high_residuals_df)
+# ------------------------------------
+
+# Residuals vs Fitted values
+plot(predict(value_of_purchases_cpglm_log_identity), residuals(value_of_purchases_cpglm_log_identity, type = "response"),
+     xlab = "Fitted values", ylab = "Residuals",
+     main = "Residuals vs Fitted")
+abline(h = 0, col = "red")
+
+# QQ plot of residuals
+qqnorm(residuals(value_of_purchases_gamma_identity, type = "response"))
+qqline(residuals(value_of_purchases_gamma_identity, type = "response"), col = "red")
+
+# Observed deviance
+obs_deviance <- 401.81
+
+# Degrees of freedom
+df_residual <- 1741
+
+# Chi-squared test
+p_value <- pchisq(obs_deviance, df = df_residual, lower.tail = FALSE)
+
+cat("P-value for Chi-squared test:", p_value, "\n")
+
+# Install and load necessary package
+if (!require("car")) install.packages("car")
+library(car)
+
+# Influence Plot
+influencePlot(value_of_purchases_gamma_identity, id.method = "identify", main = "Influence Plot",
+              sub = "Circle size is proportional to Cook's distance")
+# Assuming 'users_data_tidy_filtered' is your data frame
+outlier_indices <- c(1593, 1131)
+outliers <- users_data_tidy_filtered[outlier_indices, ]
+
+# Print the outliers to the R console
+print(outliers)
+
+```
+
+
+#5.3.5-Poshoc  amount of session with poisson
+```{r preprocessing, warning=F, message=F, echo=F}
+#print("\n-----------------ANOVA: amount_of_session-----------------")
+# anova_sum_in_product <- aov(log(amount_of_session+1) ~ experiment_case,
+#                            data = users_data_tidy_filtered)
+# summary(anova_sum_in_product)
+glm_amount_of_session_gaussian <- glm(log(amount_of_session) ~ as.factor(experiment_case),
+                                            family = gaussian(),
+                                            data = users_data_tidy_filtered)
+summary(glm_amount_of_session_gaussian)
+
+#print("\n-----------------glm_gamma: amount_of_session-----------------")
+glm_amount_of_session_gamma_identity <- glm(amount_of_session ~ as.factor(experiment_case),
+                                            family = Gamma(link = "identity"),
+                                            data = users_data_tidy_filtered)
+
+summary(glm_amount_of_session_gamma_identity)
+
+#print("\n-----------------glm_poisson: amount_of_session-----------------\n")
+#glm_amount_of_session_poisson_log <- glm(amount_of_session ~ as.factor(experiment_case), 
+#                                         family = poisson(link = "log"), 
+#                                         data = users_data_tidy_filtered)
+
+glm_amount_of_session_poisson_identity <- glm(amount_of_session ~ as.factor(experiment_case),
+                                             family = poisson(link = "identity"),
+                                             data = users_data_tidy_filtered)
+
+#glm_amount_of_session_poisson_sqrt <- glm(amount_of_session ~ as.factor(experiment_case), 
+#                                          family = poisson(link = "sqrt"), 
+#                                          data = users_data_tidy_filtered)
+
+#print(paste('AIC of glm_amount_of_session_poisson_log:',AIC(glm_amount_of_session_poisson_log)))
+#print(paste('AIC of glm_amount_of_session_poisson_identity:',AIC(glm_amount_of_session_poisson_identity)))
+#print(paste('AIC of glm_amount_of_session_poisson_sqrt:',AIC(glm_amount_of_session_poisson_sqrt)))
+
+#summary(glm_amount_of_session_poisson_log)
+summary(glm_amount_of_session_poisson_identity)
+#summary(glm_amount_of_session_poisson_sqrt)
+
+
+# print ('\n-----------------tweedie_cpglm: amount_of_session')
+# Fit the Compound Poisson Generalized Linear Model
+# amount_of_sessions_cpglm_identity <- cpglm(amount_of_session ~ experiment_case, 
+#                      data = users_data_tidy_filtered, 
+#                      link = "identity")
+
+#amount_of_sessions_cpglm_log <- cpglm(amount_of_session ~ experiment_case, 
+#                     data = users_data_tidy_filtered, 
+#                     link = "log")
+
+#amount_of_sessions_cpglm_sqrt <- cpglm(amount_of_session ~ experiment_case, 
+#                     data = users_data_tidy_filtered, 
+#                     link = "sqrt")
+
+
+# print(paste('AIC of amount_of_sessions_cpglm_identity:',AIC(amount_of_sessions_cpglm_identity)))
+#print(paste('AIC of amount_of_sessions_cpglm_log:',AIC(amount_of_sessions_cpglm_log)))
+#print(paste('AIC of amount_of_sessions_cpglm_sqrt:',AIC(amount_of_sessions_cpglm_sqrt)))
+
+# summary(amount_of_sessions_cpglm_identity)
+#summary(amount_of_sessions_cpglm_log)
+#summary(amount_of_sessions_cpglm_sqrt)
+
+# print ('\n-----------------tweedie_glm: amount_of_session')
+# Estimate the power parameter
+#power_estimate <- tweedie.profile(amount_of_session ~ as.factor(experiment_case), 
+#                                  p.vec=seq(1, 5, by=1),
+#                                  data=users_data_tidy_filtered)
+#power_param <- power_estimate$p.max
+
+#print(paste('power parameter:',power_estimate$p.max))
+
+# value_of_purchases_tweedie <- glm(amount_of_session ~ as.factor(experiment_case),
+#                 family = tweedie(var.power = power_param),
+#                 data = users_data_tidy_filtered)
+
+
+#summary(value_of_purchases_tweedie)
+
+print ('\n-----------------Graphical Analysis of best fitted model')
+
+# INPUT CANDIDATE MODEL HERE!!!!
+variable_selected_model <- value_of_purchases_tweedie
+
+# Residuals vs Fitted values
+plot(predict(variable_selected_model), residuals(variable_selected_model, type = "response"),
+     xlab = "Fitted values", ylab = "Residuals",
+     main = "Residuals vs Fitted variable_selected_model")
+abline(h = 0, col = "red")
+
+# QQ plot of residuals
+qqnorm(residuals(variable_selected_model, type = "response"))
+qqline(residuals(variable_selected_model, type = "response"), col = "red")
+
+# ------------------------------------Plot High Residuals Cooks distance
+# Install and load necessary package
+if (!require("car")) install.packages("car")
+library(car)
+
+# Influence Plot
+influencePlot(variable_selected_model, id.method = "identify", main = "Influence Plot",
+              sub = "Circle size is proportional to Cook's distance")
+
+
+print ('\n-----------------P-value for Chi-squared testl')
+
+# Assuming 'model' is your fitted GLM model
+
+# Extract observed deviance
+obs_deviance <- deviance(variable_selected_model)
+
+# Calculate degrees of freedom for residuals
+# Total number of observations
+n_obs <- nrow(variable_selected_model$data)
+
+# Number of model parameters (including intercept)
+# You can use length(coef(model)) or access the model's df.residual directly
+n_params <- length(coef(variable_selected_model))
+# Alternatively, use:
+# n_params <- df.residual(model) + 1
+
+# Calculate degrees of freedom for residuals
+df_residual <- n_obs - n_params
+
+# Print the values
+cat("Observed Deviance:", obs_deviance, "\n")
+cat("Degrees of Freedom for Residuals:", df_residual, "\n")
+
+# Chi-squared test
+p_value <- pchisq(obs_deviance, df = df_residual, lower.tail = FALSE)
+cat("P-value for Chi-squared test:", p_value, "\n")
+# ------------------------------------Print High Residuals
+# Assuming 'model' is your fitted GLM model
+# Calculate standardized residuals
+std_residuals <- rstandard(variable_selected_model)
+
+# ------------------------------------Print retrieve std_residuals for cplm object class
+
+# Extract residuals from the model
+# residuals <- residuals(variable_selected_model)
+
+# You need to obtain the standard errors of the residuals. This might be done by looking at the
+# summary or the model object itself to see if standard errors are available. This is just an example:
+# std_errors <- sqrt(summary(variable_selected_model)$dispersion)
+
+# Now, calculate the standardized residuals
+# std_residuals <- residuals / std_errors
+
+
+# ------------------------------------Continue with high residuals
+# Create a logical vector where TRUE indicates a standardized residual greater than 3
+high_residuals <- abs(std_residuals) > 3
+
+# Subset your original data frame to only include these high-residual observations
+high_residuals_df <- users_data_tidy_filtered[high_residuals, ]
+
+# Print the new data frame with outliers
+print(high_residuals_df)
+
+# ------------------------------------Creates new df excluding datapoints with high residuals
+
+
+# Create a logical vector where TRUE indicates a standardized residual less than 3
+low_residuals <- abs(std_residuals) < 3
+# Subset your original data frame to only include these low-residual observations
+users_data_tidy_filtered_low_residuals_df <- users_data_tidy_filtered[low_residuals, ]
+
+# Print the new data frame without outliers
+print(users_data_tidy_filtered_low_residuals_df)
+
+
+
+
+print("-----------------New modeling with data with no outliers-----------------")
+
+selected_model_without_outliers <- glm(amount_of_session ~ as.factor(experiment_case),
+                                           family = Gamma(link = "identity"),
+                                           data = users_data_tidy_filtered_low_residuals_df)
+
+selected_model_without_outliers <- glm(amount_of_session ~ as.factor(experiment_case),
+                family = tweedie(var.power = power_param),
+                data = users_data_tidy_filtered_low_residuals_df)
+
+# selected_model_without_outliers <- cpglm(amount_of_session ~ experiment_case, 
+#                      data = users_data_tidy_filtered_low_residuals_df, 
+#                      link = "identity")
+
+
+
+
+
+summary(variable_selected_model)
+summary(selected_model_without_outliers)
+
+# Residuals vs Fitted values
+plot(predict(glm_amount_of_session_gamma_identity_low_residuals), residuals(glm_amount_of_session_gamma_identity_low_residuals, type = "response"),
+     xlab = "Fitted values", ylab = "Residuals",
+     main = "Residuals vs Fitted glm_amount_of_session_gamma_identity_low_residuals")
+abline(h = 0, col = "red")
+
+# QQ plot of residuals
+qqnorm(residuals(glm_amount_of_session_gamma_identity_low_residuals, type = "response"))
+qqline(residuals(glm_amount_of_session_gamma_identity_low_residuals, type = "response"), col = "red")
+
+# Influence Plot
+influencePlot(glm_amount_of_session_gamma_identity_low_residuals, id.method = "identify", main = "Influence Plot",
+              sub = "Circle size is proportional to Cook's distance")
+
+
+print(paste('mean total amount of sessions:',mean(users_data_tidy_filtered$amount_of_session)))
+print(paste('var total amount of sessions:',var(users_data_tidy_filtered$amount_of_session)))
+shape_amount_sessions = (mean(users_data_tidy_filtered$amount_of_session)^2)/var(users_data_tidy_filtered$amount_of_session)
+print(paste('var total amount of sessions:',shape_amount_sessions))
+
+
+# print("-----------------Visualy inspecting amount of sessions-----------------")
+# glm_total_amount_session <- glm(users_data_tidy_filtered$amount_of_session~1, family = Gamma(link=identity))
+# sumary_glm_total_amount_session<-summary(glm_total_amount_session)
+# 
+# users_data_tidy_filtered_only_0 <- users_data_tidy_filtered %>% 
+#   filter(experiment_case == 0)
+# glm_0_amount_session <- glm(amount_of_session~1, 
+#                             family = Gamma(link=identity),
+#                             data = users_data_tidy_filtered_only_0)
+# sumary_glm_0_amount_session<-summary(glm_0_amount_session)
+# print(sumary_glm_0_amount_session)
+# 
+# users_data_tidy_filtered_only_1 <- users_data_tidy_filtered %>% 
+#   filter(experiment_case == 1)
+# glm_1_amount_session <- glm(amount_of_session~1, 
+#                             family = Gamma(link=identity),
+#                             data = users_data_tidy_filtered_only_1)
+# sumary_glm_1_amount_session<-summary(glm_1_amount_session)
+# 
+# 
+# users_data_tidy_filtered_only_2 <- users_data_tidy_filtered %>% 
+#   filter(experiment_case == 2)
+# glm_2_amount_session <- glm(amount_of_session~1, 
+#                             family = Gamma(link=identity),
+#                             data = users_data_tidy_filtered_only_2)
+# sumary_glm_2_amount_session<-summary(glm_2_amount_session)
+# 
+# shape_total <- 1/sumary_glm_total_amount_session$dispersion
+# scale_total <- as.numeric(coef(glm_total_amount_session))/shape_total
+# 
+# shape_0 <- 1/sumary_glm_0_amount_session$dispersion
+# scale_0 <- as.numeric(coef(glm_0_amount_session))/shape_0
+# print(scale_0)
+# 
+# shape_1 <- 1/sumary_glm_1_amount_session$dispersion
+# scale_1 <- as.numeric(coef(glm_total_amount_session))/shape_1
+# 
+# shape_2 <- 1/sumary_glm_2_amount_session$dispersion
+# scale_2 <- as.numeric(coef(glm_1_amount_session))/shape_2
+# 
+# 
+# hist(users_data_tidy_filtered$amount_of_session, freq = FALSE, ylim = c(0, 0.1))
+# # curve(dgamma(x, shape = shape_total, scale = scale_total), from = 0, to = 10, 
+# #       col = "red", add = TRUE)
+# curve(dgamma(x, shape = shape_0, scale = scale_0), from = 0, to = 20, 
+#       col = "blue", add = TRUE)
+# curve(dgamma(x, shape = shape_1, scale = scale_1), from = 0, to = 20, 
+#       col = "purple", add = TRUE)
+# curve(dgamma(x, shape = shape_2, scale = scale_2), from = 0, to = 20, 
+#       col = "red", add = TRUE)
+summary(glm_amount_of_session_gamma_identity)
+summary(glm_total_amount_session)
+
+```
+#5.3.3-Mediation Testing
+```{r preprocessing, warning=F, message=F, echo=F}
+if (!require(mediation)) install.packages("mediation")
+library(mediation)
+users_data_tidy_filtered_mediation_analysis <- users_data_tidy_filtered %>% 
+  mutate(sum_in_producer = sum_in_producer+10,
+         experiment_case = as.factor(experiment_case),
+         value_of_purchases = value_of_purchases + 1)
+
+glm_sum_in_product_gamma_identity <- glm(sum_in_producer ~ experiment_case,
+                                         family = Gamma(link = "identity"),
+                                         data = users_data_tidy_filtered_mediation_analysis)
+
+glm_amount_of_session_gamma_identity <- glm(amount_of_session ~ experiment_case,
+                                            family = Gamma(link = "identity"),
+                                            data = users_data_tidy_filtered_mediation_analysis)
+
+glm_amount_of_session_vs_time_gamma_identity <- glm(amount_of_session ~ sum_in_producer,
+                                            family = Gamma(link = "identity"),
+                                            data = users_data_tidy_filtered_mediation_analysis)
+summary(glm_amount_of_session_vs_time_gamma_identity)
+
+fit.totaleffect <- glm_amount_of_session_gamma_identity
+fit.mediator <- glm_sum_in_product_gamma_identity
+
+fit.dv <- glm(amount_of_session ~ experiment_case + sum_in_producer, 
+                       family = Gamma(link = "identity"), 
+                       data = users_data_tidy_filtered_mediation_analysis)
+
+summary(fit.totaleffect)
+summary(fit.mediator)
+summary(fit.dv)
+
+results = mediate(fit.mediator, fit.dv, treat='experiment_case', mediator='sum_in_producer',  sims = 1000)
+
+summary(results)
+
+a=flexplot(amount_of_session~sum_in_producer | experiment_case, data=users_data_tidy_filtered,
+           method = "poisson", se=F,
+           ghost.line = "gray",ghost.reference = list(experiment_case=0))
+a
+
+b=flexp lot(value_of_purchases~sum_in_producer | experiment_case, data=users_data_tidy_filtered,
+           method = "poisson", se=F,ghost.line = "gray",ghost.reference = list(experiment_case=0))
+b
+
+```
+
+
